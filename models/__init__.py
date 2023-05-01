@@ -2,5 +2,5 @@
 from .detr import build
 
 
-def build_model(args):
-    return build(args)
+def build_model(args, get_dict_batch, train_dataset):
+    return build(args, get_dict_batch, train_dataset)

@@ -227,17 +227,17 @@ class MetricLogger(object):
             if i % print_freq == 0 or i == len(iterable) - 1:
                 eta_seconds = iter_time.global_avg * (len(iterable) - i)
                 eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
-                if torch.cuda.is_available():
-                    print(log_msg.format(
-                        i, len(iterable), eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time),
-                        memory=torch.cuda.max_memory_allocated() / MB))
-                else:
-                    print(log_msg.format(
-                        i, len(iterable), eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time)))
+                # if torch.cuda.is_available():
+                #     print(log_msg.format(
+                #         i, len(iterable), eta=eta_string,
+                #         meters=str(self),
+                #         time=str(iter_time), data=str(data_time),
+                #         memory=torch.cuda.max_memory_allocated() / MB))
+                # else:
+                #     print(log_msg.format(
+                #         i, len(iterable), eta=eta_string,
+                #         meters=str(self),
+                #         time=str(iter_time), data=str(data_time)))
             i += 1
             end = time.time()
         total_time = time.time() - start_time
@@ -299,6 +299,30 @@ class NestedTensor(object):
 
     def decompose(self):
         return self.tensors, self.mask
+
+    # to create microbatches for Varuna
+    def varunafy(self, num_microbatches, chunk_size):
+
+        microbatches = []
+
+        tensors = self.tensors
+        mask = self.mask
+
+        if tensors.size(0) == 1:
+            chunk = NestedTensor(tensors, mask)
+            return [chunk for _ in range(num_microbatches)]
+
+        chunked_tensors = tensors.split(chunk_size)
+        if mask is not None:
+            chunked_masks = mask.split(chunk_size)
+              
+        for i,tensors in enumerate(chunked_tensors):
+            if mask is not None:
+                mask = chunked_masks[i] 
+            chunk = NestedTensor(tensors, mask)
+            microbatches.append(chunk)
+        
+        return microbatches
 
     def __repr__(self):
         return str(self.tensors)
@@ -409,9 +433,9 @@ def init_distributed_mode(args):
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ['WORLD_SIZE'])
         args.gpu = int(os.environ['LOCAL_RANK'])
-    elif 'SLURM_PROCID' in os.environ:
-        args.rank = int(os.environ['SLURM_PROCID'])
-        args.gpu = args.rank % torch.cuda.device_count()
+    elif 'SLURM_PROCID' in os.environ and torch.cuda.device_count() > 0:
+        # args.rank = int(os.environ['SLURM_PROCID'])
+        args.gpu = args.local_rank
     else:
         print('Not using distributed mode')
         args.distributed = False
@@ -420,13 +444,13 @@ def init_distributed_mode(args):
     args.distributed = True
 
     torch.cuda.set_device(args.gpu)
-    args.dist_backend = 'nccl'
+    args.dist_backend = 'gloo' if args.varuna else 'nccl'
     print('| distributed init (rank {}): {}'.format(
         args.rank, args.dist_url), flush=True)
     torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                          world_size=args.world_size, rank=args.rank)
     torch.distributed.barrier()
-    setup_for_distributed(args.rank == 0)
+    # setup_for_distributed(args.rank == 0)
 
 
 @torch.no_grad()

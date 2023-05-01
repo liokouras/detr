@@ -9,13 +9,28 @@ from torch import nn
 from util import box_ops
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate,
-                       is_dist_avail_and_initialized)
+                       is_dist_avail_and_initialized, collate_fn)
 
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
                            dice_loss, sigmoid_focal_loss)
 from .transformer import build_transformer
+
+from varuna import Varuna, get_varuna_config, get_this_rank_config_varuna, CutPoint
+
+class DetrWithCriterion(torch.nn.Module):
+    def __init__(self, detr, criterion):
+        super(DetrWithCriterion, self).__init__()
+        self.model = detr
+        self.criterion = criterion
+   
+    def forward(self, samples, targets):
+        outputs = self.model(samples)
+        loss_dict = self.criterion(outputs, targets)
+        weight_dict = self.criterion.weight_dict
+        losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+        return losses
 
 
 class DETR(nn.Module):
@@ -40,6 +55,7 @@ class DETR(nn.Module):
         self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
         self.backbone = backbone
         self.aux_loss = aux_loss
+        self.cutpoint = CutPoint()
 
     def forward(self, samples: NestedTensor):
         """ The forward expects a NestedTensor, which consists of:
@@ -58,11 +74,21 @@ class DETR(nn.Module):
         """
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
-        features, pos = self.backbone(samples)
+        backbone_outs = self.backbone(samples)
+        if backbone_outs is not None:
+            features, pos = backbone_outs
+            src, mask = features[-1].decompose()
+            assert mask is not None
 
-        src, mask = features[-1].decompose()
-        assert mask is not None
-        hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[0]
+            hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[0]
+        else:
+            features = None
+            pos = None
+            src = None
+            mask = None
+            hs = None
+
+        hs = self.cutpoint(hs)
 
         outputs_class = self.class_embed(hs)
         outputs_coord = self.bbox_embed(hs).sigmoid()
@@ -227,8 +253,8 @@ class SetCriterion(nn.Module):
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
         num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
-        if is_dist_avail_and_initialized():
-            torch.distributed.all_reduce(num_boxes)
+        # if is_dist_avail_and_initialized():
+        #     torch.distributed.all_reduce(num_boxes)
         num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
 
         # Compute all the requested losses
@@ -301,7 +327,7 @@ class MLP(nn.Module):
         return x
 
 
-def build(args):
+def build(args, get_dict_batch, train_dataset):
     # the `num_classes` naming here is somewhat misleading.
     # it indeed corresponds to `max_obj_id + 1`, where max_obj_id
     # is the maximum id for a class in your dataset. For example,
@@ -336,7 +362,6 @@ def build(args):
     if args.masks:
         weight_dict["loss_mask"] = args.mask_loss_coef
         weight_dict["loss_dice"] = args.dice_loss_coef
-    # TODO this is a hack
     if args.aux_loss:
         aux_weight_dict = {}
         for i in range(args.dec_layers - 1):
@@ -348,7 +373,26 @@ def build(args):
         losses += ["masks"]
     criterion = SetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict,
                              eos_coef=args.eos_coef, losses=losses)
-    criterion.to(device)
+    # criterion.to(device)
+
+    model = DetrWithCriterion(model, criterion)
+
+    if args.varuna:
+        train_data = train_dataset
+        def get_batch_fn(size, device=None):
+            batch = next(iter(torch.utils.data.DataLoader(train_data, batch_size=size, collate_fn=collate_fn)))
+            return get_dict_batch(batch, device=device)
+        # TODO
+        shared_weights = []
+        pipeline_parallel_size, data_parallel_size = get_varuna_config(args.stage_to_rank_map)
+        global_batch_size = args.batch_size * data_parallel_size
+        # shared_weights = [("model.bert.embeddings.word_embeddings.weight", "model.cls.predictions.decoder.weight")]
+        model = Varuna(model, args.stage_to_rank_map, get_batch_fn, global_batch_size, 
+            args.chunk_size, args.stage_to_cut, fp16=False, local_rank=args.local_rank, device=args.local_rank, shared_weights=shared_weights)
+    
+        if args.profiling:
+            model = Profiler(model, get_batch_fn, fp16=args.fp16, device = args.local_rank, from_cache=True, out_folder=args.save, add_to_existing=True)
+        
     postprocessors = {'bbox': PostProcess()}
     if args.masks:
         postprocessors['segm'] = PostProcessSegm()
@@ -356,4 +400,4 @@ def build(args):
             is_thing_map = {i: i <= 90 for i in range(201)}
             postprocessors["panoptic"] = PostProcessPanoptic(is_thing_map, threshold=0.85)
 
-    return model, criterion, postprocessors
+    return model, postprocessors
