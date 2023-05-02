@@ -378,9 +378,8 @@ def build(args, get_dict_batch, train_dataset):
     model = DetrWithCriterion(model, criterion)
 
     if args.varuna:
-        train_data = train_dataset
         def get_batch_fn(size, device=None):
-            batch = next(iter(torch.utils.data.DataLoader(train_data, batch_size=size, collate_fn=collate_fn)))
+            batch = next(iter(torch.utils.data.DataLoader(train_dataset, batch_size=size, collate_fn=collate_fn)))
             return get_dict_batch(batch, device=device)
         # TODO
         shared_weights = []
