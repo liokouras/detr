@@ -51,7 +51,8 @@ class DETR(nn.Module):
         hidden_dim = transformer.d_model
         self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
-        self.query_embed = nn.Embedding(num_queries, hidden_dim)
+        self.query_embed = nn.Parameter(nn.Embedding(num_queries, hidden_dim).weight)
+        #self.query_embed = nn.Embedding(num_queries, hidden_dim)
         self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
         self.backbone = backbone
         self.aux_loss = aux_loss
@@ -79,16 +80,16 @@ class DETR(nn.Module):
             features, pos = backbone_outs
             src, mask = features[-1].decompose()
             assert mask is not None
+            src = self.input_proj(src)
+            pos = pos[-1]
 
-            hs = self.transformer(self.input_proj(src), mask, self.query_embed.weight, pos[-1])[0]
         else:
-            features = None
-            pos = None
-            src = None
-            mask = None
-            hs = None
+            src = mask = pos = hs = None
 
-        hs = self.cutpoint(hs)
+        src, mask, pos = self.cutpoint(src, mask, pos)
+
+       
+        hs = self.transformer(src, mask, self.query_embed, pos)
 
         outputs_class = self.class_embed(hs)
         outputs_coord = self.bbox_embed(hs).sigmoid()

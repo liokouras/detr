@@ -14,6 +14,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 
+from varuna import CutPoint
+
 
 class Transformer(nn.Module):
 
@@ -45,18 +47,21 @@ class Transformer(nn.Module):
                 nn.init.xavier_uniform_(p)
 
     def forward(self, src, mask, query_embed, pos_embed):
+        if src is not None:
         # flatten NxCxHxW to HWxNxC
-        bs, c, h, w = src.shape
-        src = src.flatten(2).permute(2, 0, 1)
-        pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
-        query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
-        mask = mask.flatten(1)
+            bs, c, h, w = src.shape
+            src = src.flatten(2).permute(2, 0, 1)
+            pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
+            query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
+            mask = mask.flatten(1)
 
         tgt = torch.zeros_like(query_embed)
-        memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
+        # also return mask and pos_embed so it is available to decoder after a cutpoint
+        memory, mask, pos_embed = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
+
         hs = self.decoder(tgt, memory, memory_key_padding_mask=mask,
                           pos=pos_embed, query_pos=query_embed)
-        return hs.transpose(1, 2), memory.permute(1, 2, 0).view(bs, c, h, w)
+        return hs.transpose(1, 2) #, memory.permute(1, 2, 0).view(bs, c, h, w)
 
 
 class TransformerEncoder(nn.Module):
@@ -67,20 +72,38 @@ class TransformerEncoder(nn.Module):
         self.num_layers = num_layers
         self.norm = norm
 
+        #self.cutpoints = nn.ModuleList([CutPoint() for _ in range(num_layers - 1)])
+
     def forward(self, src,
                 mask: Optional[Tensor] = None,
                 src_key_padding_mask: Optional[Tensor] = None,
                 pos: Optional[Tensor] = None):
         output = src
 
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             output = layer(output, src_mask=mask,
                            src_key_padding_mask=src_key_padding_mask, pos=pos)
+
+            # print("output grad func : ", output.grad_fn)
+            # catted = torch.cat((output, pos), dim=1)
+            # print("--------------- catted ------------\n", catted.grad_fn)
+            # split = torch.split(catted, 1, dim=1)
+            # print("-------------- split ---------------- \n length:", len(split))
+            # print("gran functs: ", [s.grad_fn for s in split])
+            # print(output)
+            # print(src_key_padding_mask)
+            # print(pos)
+            # output shape:  torch.Size([625, 1, 256])
+            # srckeypadmask shape:  torch.Size([1, 625])
+            # pos shape:  torch.Size([625, 1, 256])
+
+            # if i < len(self.cutpoints):
+            #     output, src_key_padding_mask, pos = self.cutpoints[i](output, src_key_padding_mask, pos)
 
         if self.norm is not None:
             output = self.norm(output)
 
-        return output
+        return output, src_key_padding_mask, pos
 
 
 class TransformerDecoder(nn.Module):
