@@ -56,7 +56,9 @@ class DETR(nn.Module):
         self.input_proj = nn.Conv2d(backbone.num_channels, hidden_dim, kernel_size=1)
         self.backbone = backbone
         self.aux_loss = aux_loss
-        self.cutpoint = CutPoint()
+
+        self.pre_trans_cp = CutPoint()
+        self.pre_crit_cp = CutPoint()
 
     def forward(self, samples: NestedTensor):
         """ The forward expects a NestedTensor, which consists of:
@@ -71,25 +73,33 @@ class DETR(nn.Module):
                                relative to the size of each individual image (disregarding possible padding).
                                See PostProcess for information on how to retrieve the unnormalized bounding box.
                - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
-                                dictionnaries containing the two above keys for each decoder layer.
+                                dictionaries containing the two above keys for each decoder layer.
         """
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
+
         backbone_outs = self.backbone(samples)
+
         if backbone_outs is not None:
             features, pos = backbone_outs
             src, mask = features[-1].decompose()
             assert mask is not None
             src = self.input_proj(src)
             pos = pos[-1]
-
         else:
-            src = mask = pos = hs = None
+            src = mask = pos = None
 
-        src, mask, pos = self.cutpoint(src, mask, pos)
+        cp_outs = self.pre_trans_cp(src, mask, pos)
 
-       
+        if cp_outs[0] is not None:
+            src, mask, pos = cp_outs
+
         hs = self.transformer(src, mask, self.query_embed, pos)
+
+        hs = self.pre_crit_cp(hs)
+
+        if hs[0] is not None:
+            hs = hs[0]
 
         outputs_class = self.class_embed(hs)
         outputs_coord = self.bbox_embed(hs).sigmoid()
