@@ -58,7 +58,7 @@ class DETR(nn.Module):
         self.aux_loss = aux_loss
 
         self.pre_trans_cp = CutPoint()
-        self.pre_crit_cp = CutPoint()
+        self.pre_pred_cp = CutPoint()
 
     def forward(self, samples: NestedTensor):
         """ The forward expects a NestedTensor, which consists of:
@@ -96,10 +96,7 @@ class DETR(nn.Module):
 
         hs = self.transformer(src, mask, self.query_embed, pos)
 
-        hs = self.pre_crit_cp(hs)
-
-        if hs[0] is not None:
-            hs = hs[0]
+        hs = self.pre_pred_cp(hs)
 
         outputs_class = self.class_embed(hs)
         outputs_coord = self.bbox_embed(hs).sigmoid()
