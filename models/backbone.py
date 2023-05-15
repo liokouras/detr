@@ -3,17 +3,22 @@
 Backbone modules.
 """
 from collections import OrderedDict
+from typing import Any, Callable, List, Optional, Type, Union
+import re
 
 import torch
 import torch.nn.functional as F
 import torchvision
+import torchvision.models as models
 from torch import nn
-from torchvision.models._utils import IntermediateLayerGetter
+from torchvision.models._utils import IntermediateLayerGetter, _ovewrite_named_param
 from typing import Dict, List
 
 from util.misc import NestedTensor, is_main_process
 
 from .position_encoding import build_position_encoding
+
+from varuna import CutPoint
 
 
 class FrozenBatchNorm2d(torch.nn.Module):
@@ -57,7 +62,7 @@ class FrozenBatchNorm2d(torch.nn.Module):
 
 class BackboneBase(nn.Module):
 
-    def __init__(self, backbone: nn.Module, train_backbone: bool, num_channels: int, return_interm_layers: bool):
+    def __init__(self, backbone: nn.Module, train_backbone: bool, num_channels: int, return_interm_layers: bool, varuna: bool):
         super().__init__()
         for name, parameter in backbone.named_parameters():
             if not train_backbone or 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
@@ -66,11 +71,16 @@ class BackboneBase(nn.Module):
             return_layers = {"layer1": "0", "layer2": "1", "layer3": "2", "layer4": "3"}
         else:
             return_layers = {'layer4': "0"}
-        self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
+        if varuna:
+            self.body = backbone
+        else:
+            self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
         self.num_channels = num_channels
 
     def forward(self, tensor_list: NestedTensor):
-        xs = self.body(tensor_list.tensors)
+        xs = self.body(tensor_list.tensors) 
+        # xs is the activations/output of layer4 of the backbone model.
+        # singleton dict: {"0", layer4 output tensor}
         out: Dict[str, NestedTensor] = {}
         for name, x in xs.items():
             m = tensor_list.mask
@@ -85,14 +95,117 @@ class Backbone(BackboneBase):
     def __init__(self, name: str,
                  train_backbone: bool,
                  return_interm_layers: bool,
-                 dilation: bool):
-        backbone = getattr(torchvision.models, name)(
-            replace_stride_with_dilation=[False, False, dilation],
-            weights='ResNet50_Weights.DEFAULT',
-            # pretrained=is_main_process(), 
-            norm_layer=FrozenBatchNorm2d)
+                 dilation: bool,
+                 varuna: bool):
+        if varuna:
+            backbone = ResNetVaruna([False, False, dilation])
+        else:
+            backbone = getattr(torchvision.models, name)(
+                replace_stride_with_dilation=[False, False, dilation],
+                pretrained=is_main_process(), 
+                norm_layer=FrozenBatchNorm2d)
         num_channels = 512 if name in ('resnet18', 'resnet34') else 2048
-        super().__init__(backbone, train_backbone, num_channels, return_interm_layers)
+        super().__init__(backbone, train_backbone, num_channels, return_interm_layers, varuna)
+
+class ResNetVaruna(models.resnet.ResNet):
+    # HARD-CODING THE USE OF RESNET101 !!
+    def __init__(self, replace_stride_with_dilation, **kwargs):
+        super().__init__(
+            models.resnet.Bottleneck, [3, 4, 23, 3],
+            replace_stride_with_dilation=replace_stride_with_dilation,
+            norm_layer=FrozenBatchNorm2d)
+
+        weights = models.ResNet101_Weights.verify(models.ResNet101_Weights.DEFAULT)
+        _ovewrite_named_param(kwargs, "num_classes", len(weights.meta["categories"]))
+        
+        weight_dict = self.rename_weights(weights.get_state_dict(progress=True))
+        self.load_state_dict(weight_dict)
+
+        self.cp2to3 = CutPoint()
+        self.cp3to4 = CutPoint()
+
+    def _make_layer(
+        self,
+        block: Type[Union[models.resnet.BasicBlock, models.resnet.Bottleneck]],
+        planes: int,
+        blocks: int,
+        stride: int = 1,
+        dilate: bool = False,
+    ) -> nn.Sequential:
+        norm_layer = self._norm_layer
+        downsample = None
+        previous_dilation = self.dilation
+        if dilate:
+            self.dilation *= stride
+            stride = 1
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                models.resnet.conv1x1(self.inplanes, planes * block.expansion, stride),
+                norm_layer(planes * block.expansion),
+            )
+
+        layers = []
+        layers.append(
+            block(
+                self.inplanes, planes, stride, downsample, self.groups, self.base_width, previous_dilation, norm_layer
+            )
+        )
+        self.inplanes = planes * block.expansion
+        for _ in range(1, blocks):
+            # HACK: Layer1 is only layer with stride = 1
+            # Layer1 mustn't have CPs as it is not trainable.
+            if stride > 1:
+                layers.append(CutPoint()) 
+            layers.append(
+                block(
+                    self.inplanes,
+                    planes,
+                    groups=self.groups,
+                    base_width=self.base_width,
+                    dilation=self.dilation,
+                    norm_layer=norm_layer,
+                )
+            )
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        returndict = {}
+
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.cp2to3(x)
+        x = self.layer3(x)
+        x = self.cp3to4(x)
+        x = self.layer4(x)
+
+        # make output compatible with what BackboneBase expects
+        returndict["0"] = x
+
+        return returndict
+
+    def rename_weights(self, weights):
+        # regular expression for ResNet layers containing cutpoints
+        pattern = r"(layer(?!1).\.)(\d+)(\..*)"
+
+        new_state_dict = {}
+
+        for key, value in weights.items():
+            match = re.match(pattern, key)
+
+            if match:
+                # block-index is doubled due to cutpoint insertion
+                new_idx = match.group(1) + str(int(match.group(2)) * 2) + match.group(3)
+                new_key = re.sub(pattern, new_idx, key)
+                new_state_dict[new_key] = value
+            else:
+                new_state_dict[key] = value
+
+        return new_state_dict
 
 
 class Joiner(nn.Sequential):
@@ -115,7 +228,7 @@ def build_backbone(args):
     position_embedding = build_position_encoding(args)
     train_backbone = args.lr_backbone > 0
     return_interm_layers = args.masks
-    backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+    backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation, args.varuna)
     model = Joiner(backbone, position_embedding)
     model.num_channels = backbone.num_channels
     return model
