@@ -105,6 +105,10 @@ class TransformerDecoder(nn.Module):
         self.layers = _get_clones(decoder_layer, num_layers)
         self.num_layers = num_layers
         self.norm = norm
+        if norm is not None:
+            # Made separate layers for Varuna; their params are marked as shared
+            self.norm_layers = _get_clones(norm, num_layers)
+
         self.return_intermediate = return_intermediate
 
         self.cutpoints = nn.ModuleList([CutPoint() for _ in range(num_layers - 1)])
@@ -127,11 +131,20 @@ class TransformerDecoder(nn.Module):
                            tgt_key_padding_mask=tgt_key_padding_mask,
                            memory_key_padding_mask=memory_key_padding_mask,
                            pos=pos, query_pos=query_pos)
-            if self.return_intermediate:
-                intermediate.append(self.norm(output))
+            if self.return_intermediate and output is not None:
+                intermediate.append(self.norm_layers[i](output))
 
             if i < len(self.cutpoints):
-                output, memory, memory_key_padding_mask, pos, query_pos = self.cutpoints[i](output, memory, memory_key_padding_mask, pos, query_pos)
+                if self.return_intermediate:
+                    if len(intermediate) > 0:
+                        intermediates = torch.stack(intermediate)
+                    else:
+                        intermediates = None
+                    output, intermediates, memory, memory_key_padding_mask, pos, query_pos = self.cutpoints[i](output, intermediates, memory, memory_key_padding_mask, pos, query_pos)
+                    if intermediates is not None:
+                        intermediate = list(torch.unbind(intermediates))
+                else:
+                    output, memory, memory_key_padding_mask, pos, query_pos = self.cutpoints[i](output, memory, memory_key_padding_mask, pos, query_pos)
 
         if self.norm is not None:
             output = self.norm(output)

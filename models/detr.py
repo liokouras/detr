@@ -391,11 +391,17 @@ def build(args, get_dict_batch, train_dataset):
         def get_batch_fn(size, device=None):
             batch = next(iter(torch.utils.data.DataLoader(train_dataset, batch_size=size, collate_fn=collate_fn)))
             return get_dict_batch(batch, device=device)
-        # TODO
+
         shared_weights = []
         pipeline_parallel_size, data_parallel_size = get_varuna_config(args.stage_to_rank_map)
         global_batch_size = args.batch_size * data_parallel_size
-        # shared_weights = [("model.bert.embeddings.word_embeddings.weight", "model.cls.predictions.decoder.weight")]
+
+        weight_params = ["model.transformer.decoder.norm.weight"]
+        shared_param = "model.transformer.decoder.norm_layers."
+        for i in range(args.dec_layers):
+            weight_params.append(shared_param + str(i) + ".weight")
+        shared_weights = [tuple(weight_params)]
+
         model = Varuna(model, args.stage_to_rank_map, get_batch_fn, global_batch_size, 
             args.chunk_size, args.stage_to_cut, fp16=False, local_rank=args.local_rank, device=args.local_rank, shared_weights=shared_weights)
     

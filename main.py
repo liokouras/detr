@@ -230,7 +230,7 @@ def main(args):
                     'args': args,
                 }, checkpoint_path)
 
-        # TODO
+        # TODO BAZI
         test_stats, coco_evaluator = evaluate(
             model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
         )
