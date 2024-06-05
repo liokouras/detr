@@ -260,7 +260,7 @@ class SetCriterion(nn.Module):
         indices = self.matcher(outputs_without_aux, targets)
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
-        num_boxes = sum(len(t["labels"]) for t in targets)
+        num_boxes = max(sum(len(t["labels"]) for t in targets), 1)
         if not self.varuna:
             num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
             if is_dist_avail_and_initialized():
@@ -389,7 +389,12 @@ def build(args, get_dict_batch, train_dataset):
 
     if args.varuna:
         def get_batch_fn(size, device=None):
+            # BAZI UPDATE
             batch = next(iter(torch.utils.data.DataLoader(train_dataset, batch_size=size, collate_fn=collate_fn)))
+            max_size = [3, 1333, 1333]
+            samples, targets = batch
+            samples = nested_tensor_from_tensor_list(samples.tensors, max_size)
+            batch = tuple([samples, targets])
             return get_dict_batch(batch, device=device)
 
         shared_weights = []
@@ -403,7 +408,8 @@ def build(args, get_dict_batch, train_dataset):
         shared_weights = [tuple(weight_params)]
 
         model = Varuna(model, args.stage_to_rank_map, get_batch_fn, global_batch_size, 
-            args.chunk_size, args.stage_to_cut, fp16=False, local_rank=args.local_rank, device=args.local_rank, shared_weights=shared_weights)
+            args.chunk_size, args.stage_to_cut, fp16=False, local_rank=args.local_rank,
+            device=args.local_rank, shared_weights=shared_weights, profiling_stages=args.profiling_stages)
     
         if args.profiling:
             model = Profiler(model, get_batch_fn, fp16=args.fp16, device = args.local_rank, from_cache=True, out_folder=args.save, add_to_existing=True)

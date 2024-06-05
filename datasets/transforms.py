@@ -94,6 +94,9 @@ def resize(image, target, size, max_size=None):
             oh = size
             ow = int(size * w / h)
 
+        if max_size is not None:
+            oh = min(oh, max_size)
+            ow = min(ow, max_size)
         return (oh, ow)
 
     def get_size(image_size, size, max_size=None):
@@ -197,15 +200,6 @@ class RandomResize(object):
     def __call__(self, img, target=None):
         size = random.choice(self.sizes)
         return resize(img, target, size, self.max_size)
-
-class BaziResize(object):
-    def __init__(self, size):
-        assert isinstance(size, (list, tuple))
-        self.size = size
-
-    def __call__(self, img, target=None):
-        return resize(img, target, self.size)
-
 
 class RandomPad(object):
     def __init__(self, max_pad):

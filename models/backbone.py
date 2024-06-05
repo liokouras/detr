@@ -98,7 +98,7 @@ class Backbone(BackboneBase):
                  dilation: bool,
                  varuna: bool):
         if varuna:
-            backbone = ResNetVaruna([False, False, dilation])
+            backbone = ResNetVaruna(name, [False, False, dilation])
         else:
             backbone = getattr(torchvision.models, name)(
                 replace_stride_with_dilation=[False, False, dilation],
@@ -108,19 +108,28 @@ class Backbone(BackboneBase):
         super().__init__(backbone, train_backbone, num_channels, return_interm_layers, varuna)
 
 class ResNetVaruna(models.resnet.ResNet):
-    # HARD-CODING THE USE OF RESNET101 !!
-    def __init__(self, replace_stride_with_dilation, **kwargs):
+    def __init__(self, name, replace_stride_with_dilation, **kwargs):
+        if name == 'wide101':
+            weights = models.Wide_ResNet101_2_Weights.verify(models.Wide_ResNet101_2_Weights.DEFAULT)
+            layers = [3, 4, 23, 3]
+        elif name == 'resnet101':
+            weights = models.ResNet101_Weights.verify(models.ResNet101_Weights.DEFAULT)
+            layers = [3, 4, 23, 3]
+        else:
+            # default to ResNet50
+            weights = models.ResNet50_Weights.verify(models.ResNet50_Weights.DEFAULT)
+            layers = [3, 4, 6, 3]
+
+        weight_dict = self.rename_weights(weights.get_state_dict(progress=True)) # TODO rename layers for RN-50 !
+
         super().__init__(
-            models.resnet.Bottleneck, [3, 4, 23, 3],
+            models.resnet.Bottleneck, layers,
             replace_stride_with_dilation=replace_stride_with_dilation,
-            norm_layer=FrozenBatchNorm2d)
+            norm_layer=FrozenBatchNorm2d,
+            width_per_group = (64 * 2) if name == 'wide101' else 64,
+            num_classes = len(weights.meta["categories"]))
 
-        weights = models.ResNet101_Weights.verify(models.ResNet101_Weights.DEFAULT)
-        _ovewrite_named_param(kwargs, "num_classes", len(weights.meta["categories"]))
-        
-        weight_dict = self.rename_weights(weights.get_state_dict(progress=True))
         self.load_state_dict(weight_dict)
-
         self.cp2to3 = CutPoint()
         self.cp3to4 = CutPoint()
 
@@ -152,9 +161,9 @@ class ResNetVaruna(models.resnet.ResNet):
         )
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
-            # HACK: Layer1 is only layer with stride = 1
+            # HACK: Layer1 is only layer with stride = 1 without dilation
             # Layer1 mustn't have CPs as it is not trainable.
-            if stride > 1:
+            if stride > 1 or dilate:
                 layers.append(CutPoint()) 
             layers.append(
                 block(

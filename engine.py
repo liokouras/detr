@@ -17,7 +17,8 @@ from datasets.panoptic_eval import PanopticEvaluator
 def train_one_epoch(model: torch.nn.Module,
                     get_dict_batch,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, max_norm: float = 0):
+                    device: torch.device, epoch: int, max_norm: float = 0,
+                    mcap_profiling: bool = False):
     model.train()
     
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -25,7 +26,19 @@ def train_one_epoch(model: torch.nn.Module,
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
 
+    batchnr = 0
+
     for batch in metric_logger.log_every(data_loader, print_freq, header):
+        batchnr += 1
+
+        if mcap_profiling:
+            if batchnr == 11:
+                return
+            max_size = [3, 1333, 1333]
+            samples, targets = batch
+            samples = utils.nested_tensor_from_tensor_list(samples.tensors, max_size)
+            batch = tuple([samples, targets])
+
         batch = get_dict_batch(batch, device=device)
 
         losses, overflow, grad_norm = model.step(batch, max_norm if max_norm > 0 else None)

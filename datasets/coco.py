@@ -132,7 +132,6 @@ def make_coco_transforms(image_set):
                     T.RandomResize(scales, max_size=1333),
                 ])
             ),
-            #T.BaziResize((800,1024)),
             normalize,
         ])
 

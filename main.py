@@ -108,6 +108,9 @@ def get_args_parser():
     parser.add_argument("--profiling", action='store_true', help="whether to run profiling for Varuna")
     parser.add_argument("--stage_to_cut", type=str, default=None, help="stage to cutpoint map of Varuna model")
     parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
+
+    parser.add_argument('--profiling_stages', type=str, default=None, help="Stages to keep intact for profiling")
+    parser.add_argument('--mcap_profiling', action='store_true', help='Flag to stabilize memory usage by maximizing sample dimensions')
     return parser
 
 
@@ -169,7 +172,7 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('number of params:', n_parameters)
+    print('number of params:', n_parameters, force=True)
 
     param_dicts = [
         {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},
@@ -214,7 +217,11 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         train_stats = train_one_epoch(
             model, get_dict_batch, data_loader_train, optimizer, device, epoch,
-            args.clip_max_norm)
+            args.clip_max_norm, args.mcap_profiling)
+
+        if args.mcap_profiling:
+            break
+
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
@@ -231,29 +238,29 @@ def main(args):
                 }, checkpoint_path)
 
         # TODO BAZI
-        test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
-        )
+        # test_stats, coco_evaluator = evaluate(
+        #     model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+        # )
 
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in test_stats.items()},
-                     'epoch': epoch,
-                     'n_parameters': n_parameters}
+        # log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
+        #              **{f'test_{k}': v for k, v in test_stats.items()},
+        #              'epoch': epoch,
+        #              'n_parameters': n_parameters}
 
-        if args.output_dir and utils.is_main_process():
-            with (output_dir / "log.txt").open("a") as f:
-                f.write(json.dumps(log_stats) + "\n")
+        # if args.output_dir and utils.is_main_process():
+        #     with (output_dir / "log.txt").open("a") as f:
+        #         f.write(json.dumps(log_stats) + "\n")
 
-            # for evaluation logs
-            if coco_evaluator is not None:
-                (output_dir / 'eval').mkdir(exist_ok=True)
-                if "bbox" in coco_evaluator.coco_eval:
-                    filenames = ['latest.pth']
-                    if epoch % 50 == 0:
-                        filenames.append(f'{epoch:03}.pth')
-                    for name in filenames:
-                        torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                   output_dir / "eval" / name)
+        #     # for evaluation logs
+        #     if coco_evaluator is not None:
+        #         (output_dir / 'eval').mkdir(exist_ok=True)
+        #         if "bbox" in coco_evaluator.coco_eval:
+        #             filenames = ['latest.pth']
+        #             if epoch % 50 == 0:
+        #                 filenames.append(f'{epoch:03}.pth')
+        #             for name in filenames:
+        #                 torch.save(coco_evaluator.coco_eval["bbox"].eval,
+        #                            output_dir / "eval" / name)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
